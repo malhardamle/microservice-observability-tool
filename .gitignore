@@ -1,0 +1,28 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Go
+service/bin/
+service/*.test
+
+# SQLite / generated data
+*.db
+*.sqlite
+data/
+runs/
+
+# Reports/artifacts
+reports/*.svg
+reports/*.png
+reports/*.html
+reports/*.perf
+reports/*.folded
+
+# Env
+.env
