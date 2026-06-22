@@ -10,6 +10,8 @@ venv/
 # Go
 service/bin/
 service/*.test
+service/.gocache/
+service/.gomodcache/
 
 # SQLite / generated data
 *.db

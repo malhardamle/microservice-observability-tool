@@ -1,0 +1,1 @@
+# Stdlib-only collector. No third-party dependency required.
