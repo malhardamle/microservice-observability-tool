@@ -1,15 +1,16 @@
 # Microservice Observability Tool
 
-This project builds a small observability pipeline around a Go microservice, a Linux procfs collector, Prometheus, Pushgateway, and Locust. The intended target is a Raspberry Pi, but the core service and instrumentation can be validated locally before touching the Pi.
+This project builds a small observability pipeline around a Go microservice, a Linux procfs collector, Prometheus, Pushgateway, Grafana, and Locust. The intended target is a Raspberry Pi, but the core service and instrumentation can be validated locally before touching the Pi.
 
 ## Current implementation
 
 - Go HTTP service on port `8080`
 - Prometheus scrape endpoint at `/metrics`
-- CPU-bound and I/O-bound workload endpoints
+- Parameterized CPU, I/O, and memory workload endpoints
 - Python collector for host CPU and memory metrics
 - 5-second metric push cycle to Pushgateway
 - Prometheus scrape config
+- Grafana dashboard support over Prometheus
 - Locust load script for repeatable HTTP pressure
 - FastAPI dashboard stub for future UI work
 
@@ -18,13 +19,13 @@ This project builds a small observability pipeline around a Go microservice, a L
 Application path:
 
 ```text
-Locust -> Go service -> /metrics -> Prometheus
+Locust/manual curls -> Go service -> /metrics -> Prometheus -> Grafana
 ```
 
 Host path:
 
 ```text
-/proc filesystem -> Python collector -> Pushgateway -> Prometheus
+/proc filesystem -> Python collector -> Pushgateway -> Prometheus -> Grafana
 ```
 
 ## What each part does
@@ -33,6 +34,7 @@ Host path:
 - [collector/main.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/collector/main.py): reads host metrics from procfs and pushes them every 5 seconds
 - [deploy/prometheus.yml](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/deploy/prometheus.yml): tells Prometheus to scrape the service and Pushgateway
 - [scripts/locustfile.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/scripts/locustfile.py): defines controlled HTTP traffic patterns
+- Grafana: visualizes Prometheus application and host metrics for live experiment monitoring
 - [dashboard/app.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/dashboard/app.py): placeholder FastAPI app for future dashboard work
 
 ## Why `/proc/stat` for CPU usage
@@ -59,8 +61,9 @@ Expected checks:
 
 ```bash
 curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/work/cpu
-curl http://127.0.0.1:8080/work/io
+curl "http://127.0.0.1:8080/work/cpu?iterations=100000000"
+curl "http://127.0.0.1:8080/work/io?sleep_ms=250"
+curl "http://127.0.0.1:8080/work/mem?mb=128&hold_ms=1000"
 curl -s http://127.0.0.1:8080/metrics | grep observability
 ```
 
@@ -85,6 +88,35 @@ GOOS=linux GOARCH=arm64 go build -o service-linux-arm64
 2. The collector samples host CPU and memory every 5 seconds.
 3. The collector pushes host metrics to Pushgateway on `http://127.0.0.1:9091`.
 4. Prometheus scrapes both targets every 5 seconds for time-series storage and querying.
+5. Grafana reads Prometheus and renders experiment dashboards.
+
+## Raspberry Pi status
+
+The Raspberry Pi validation path is working end to end:
+
+- the Go HTTP service runs on the Pi
+- parameterized workload endpoints respond correctly
+- the procfs collector pushes host metrics to Pushgateway
+- Prometheus scrapes both the service and Pushgateway
+- Grafana displays application and host metrics through Prometheus
+
+Working endpoints:
+
+```bash
+curl http://127.0.0.1:8080/health
+curl "http://127.0.0.1:8080/work/cpu?iterations=100000000"
+curl "http://127.0.0.1:8080/work/io?sleep_ms=250"
+curl "http://127.0.0.1:8080/work/mem?mb=256&hold_ms=3000"
+```
+
+Useful experiment dashboard signals:
+
+- `observability_work_cpu_duration_seconds_count`
+- `observability_work_mem_duration_seconds_count`
+- `raspberry_pi_cpu_usage_percent{cpu!="cpu"}`
+- `raspberry_pi_memory_used_percent`
+- `observability_work_cpu_duration_seconds_sum / observability_work_cpu_duration_seconds_count`
+- `observability_work_mem_duration_seconds_sum / observability_work_mem_duration_seconds_count`
 
 ## Load testing
 
@@ -109,6 +141,7 @@ From the service:
 - `observability_http_request_duration_seconds`
 - `observability_work_cpu_duration_seconds`
 - `observability_work_io_duration_seconds`
+- `observability_work_mem_duration_seconds`
 
 From the collector:
 
