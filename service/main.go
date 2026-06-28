@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -62,6 +63,24 @@ var (
 			Buckets: prometheus.DefBuckets,
 		},
 	)
+	memWorkDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "observability_work_mem_duration_seconds",
+			Help:    "Execution time for the memory-bound workload handler.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+)
+
+const (
+	defaultMemoryWorkloadMB     = 64
+	defaultMemoryWorkloadHoldMS = 250
+	maxMemoryWorkloadMB         = 512
+	maxMemoryWorkloadHoldMS     = 10000
+	defaultCPUWorkIterations    = 50_000_000
+	maxCPUWorkIterations        = 500_000_000
+	defaultIOWorkSleepMS        = 25
+	maxIOWorkSleepMS            = 10000
 )
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -116,10 +135,18 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func cpuWorkHandler(w http.ResponseWriter, r *http.Request) {
+	iterations, err := parsePositiveIntParam(r, "iterations", defaultCPUWorkIterations, maxCPUWorkIterations)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "iterations must be a positive integer up to 500000000",
+		})
+		return
+	}
+
 	start := time.Now()
 
 	total := 0
-	for i := 0; i < 50_000_000; i++ {
+	for i := 0; i < iterations; i++ {
 		total += i % 7
 	}
 
@@ -128,22 +155,94 @@ func cpuWorkHandler(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"workload":   "cpu",
+		"iterations": iterations,
 		"result":     total,
 		"elapsed_ms": elapsed.Milliseconds(),
 	})
 }
 
 func ioWorkHandler(w http.ResponseWriter, r *http.Request) {
+	sleepMS, err := parsePositiveIntParam(r, "sleep_ms", defaultIOWorkSleepMS, maxIOWorkSleepMS)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "sleep_ms must be a positive integer up to 10000",
+		})
+		return
+	}
+
 	start := time.Now()
 
-	time.Sleep(25 * time.Millisecond)
+	time.Sleep(time.Duration(sleepMS) * time.Millisecond)
 
 	elapsed := time.Since(start)
 	ioWorkDuration.Observe(elapsed.Seconds())
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"workload":   "io",
+		"sleep_ms":   sleepMS,
 		"elapsed_ms": elapsed.Milliseconds(),
+	})
+}
+
+func parsePositiveIntParam(r *http.Request, name string, defaultValue int, maxValue int) (int, error) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return defaultValue, nil
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, err
+	}
+	if value <= 0 || value > maxValue {
+		return 0, strconv.ErrSyntax
+	}
+
+	return value, nil
+}
+
+func memWorkHandler(w http.ResponseWriter, r *http.Request) {
+	mb, err := parsePositiveIntParam(r, "mb", defaultMemoryWorkloadMB, maxMemoryWorkloadMB)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "mb must be a positive integer up to 512",
+		})
+		return
+	}
+
+	holdMS, err := parsePositiveIntParam(r, "hold_ms", defaultMemoryWorkloadHoldMS, maxMemoryWorkloadHoldMS)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "hold_ms must be a positive integer up to 10000",
+		})
+		return
+	}
+
+	start := time.Now()
+	sizeBytes := mb * 1024 * 1024
+	buffer := make([]byte, sizeBytes)
+
+	for i := 0; i < len(buffer); i += 4096 {
+		buffer[i] = byte(i % 251)
+	}
+	if len(buffer) > 0 {
+		buffer[len(buffer)-1] = 1
+	}
+
+	time.Sleep(time.Duration(holdMS) * time.Millisecond)
+
+	buffer = nil
+	debug.FreeOSMemory()
+
+	elapsed := time.Since(start)
+	memWorkDuration.Observe(elapsed.Seconds())
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workload":         "memory",
+		"allocated_mb":     mb,
+		"hold_ms":          holdMS,
+		"freed_after_work": true,
+		"elapsed_ms":       elapsed.Milliseconds(),
 	})
 }
 
@@ -153,6 +252,7 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/work/cpu", cpuWorkHandler)
 	mux.HandleFunc("/work/io", ioWorkHandler)
+	mux.HandleFunc("/work/mem", memWorkHandler)
 	mux.Handle("/metrics", promhttp.Handler())
 
 	addr := ":8080"
