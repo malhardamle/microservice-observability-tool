@@ -16,11 +16,12 @@ Build a lightweight Linux observability tool for a single microservice, with the
    - supports parameterized workload sizing through query params
 
 2. Python collector
-   - reads host metrics from Linux procfs
-   - samples `/proc/stat` for CPU utilization
+   - wraps `mpstat` for CPU utilization
+   - wraps `vmstat` for memory footprint
+   - wraps `sar -n DEV` for network bandwidth
+   - wraps `iostat` for disk bandwidth
    - reads `/proc/cpuinfo` for hardware metadata
-   - reads `/proc/meminfo` for memory usage
-   - pushes metrics to Prometheus Pushgateway every 5 seconds
+   - pushes metrics to Prometheus Pushgateway every 10 seconds
 
 3. Pushgateway
    - receives pushed host metrics from the collector
@@ -48,7 +49,7 @@ Build a lightweight Linux observability tool for a single microservice, with the
 ```text
 Locust/manual curls -> Go service -> /metrics -> Prometheus -> Grafana
 
-/proc filesystem -> Python collector -> Pushgateway -> Prometheus -> Grafana
+mpstat/vmstat/sar/iostat -> Python collector -> Pushgateway -> Prometheus -> Grafana
 ```
 
 ## Metrics model
@@ -66,13 +67,18 @@ Collected inside the Go service with the Prometheus Go client:
 
 ### Host metrics
 
-Collected by the Python procfs collector:
+Collected by the Python Linux-tool collector:
 
 - `raspberry_pi_cpu_usage_percent{cpu="cpu0"}`
 - `raspberry_pi_memory_total_bytes`
 - `raspberry_pi_memory_available_bytes`
+- `raspberry_pi_memory_free_bytes`
 - `raspberry_pi_memory_used_bytes`
 - `raspberry_pi_memory_used_percent`
+- `raspberry_pi_network_receive_bytes_per_second{iface="wlan0"}`
+- `raspberry_pi_network_transmit_bytes_per_second{iface="wlan0"}`
+- `raspberry_pi_disk_read_bytes_per_second{device="mmcblk0"}`
+- `raspberry_pi_disk_write_bytes_per_second{device="mmcblk0"}`
 - `raspberry_pi_info{model="...",hardware="..."}`
 
 ## Current experiment shape
@@ -81,14 +87,14 @@ The current Raspberry Pi setup is sufficient for live experiments:
 
 - workload inputs are controlled through HTTP query params
 - application-side timing is captured by Prometheus histograms in the service
-- host-side CPU and memory behavior is sampled from `/proc` and pushed through Pushgateway
+- host-side CPU, memory, network, and disk behavior is sampled through Linux system tools and pushed through Pushgateway
 - Grafana visualizes both streams from Prometheus on a single dashboard
 
 This makes it possible to compare:
 
 - requested workload intensity, such as `iterations`, `mb`, and `hold_ms`
 - observed handler timing in the service
-- observed CPU and memory behavior on the Pi
+- observed CPU, memory, network, and disk behavior on the Pi
 
 ## Deployment assumptions
 
