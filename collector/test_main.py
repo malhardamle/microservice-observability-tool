@@ -5,11 +5,17 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from main import (
+	discover_pid_for_port,
 	parse_cpu_metrics_output,
 	parse_disk_metrics_output,
+	parse_listening_pids_output,
 	parse_memory_metrics_output,
 	parse_network_metrics_output,
+	parse_pid_cpu_metrics_output,
+	parse_pid_disk_metrics_output,
+	parse_pid_memory_metrics_output,
 )
+from unittest.mock import patch
 
 
 MPSTAT_OUTPUT = """
@@ -65,6 +71,44 @@ Device             tps    kB_read/s    kB_wrtn/s    kB_dscd/s    kB_read    kB_w
 mmcblk0           8.00        20.00        64.00         0.00         20         64          0
 """
 
+PIDSTAT_CPU_OUTPUT = """
+Linux 6.8.0-1057-raspi (hayes-valley)   07/02/2026  _aarch64_  (4 CPU)
+
+10:10:01 PM   UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command
+10:10:02 PM  1000      4242    5.00    1.00    0.00    0.00    6.00     2  service
+
+Average:      UID       PID    %usr %system  %guest   %wait    %CPU   CPU  Command
+Average:     1000      4242    5.00    1.00    0.00    0.00    6.00     -  service
+"""
+
+PIDSTAT_MEMORY_OUTPUT = """
+Linux 6.8.0-1057-raspi (hayes-valley)   07/02/2026  _aarch64_  (4 CPU)
+
+10:10:01 PM   UID       PID  minflt/s  majflt/s     VSZ      RSS   %MEM  Command
+10:10:02 PM  1000      4242      2.00      0.00  1048576    65536   1.50  service
+
+Average:      UID       PID  minflt/s  majflt/s     VSZ      RSS   %MEM  Command
+Average:     1000      4242      2.00      0.00  1048576    65536   1.50  service
+"""
+
+PIDSTAT_DISK_OUTPUT = """
+Linux 6.8.0-1057-raspi (hayes-valley)   07/02/2026  _aarch64_  (4 CPU)
+
+10:10:01 PM   UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
+10:10:02 PM  1000      4242    120.00     64.00      0.00       0  service
+
+Average:      UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
+Average:     1000      4242    120.00     64.00      0.00       0  service
+"""
+
+SS_OUTPUT_SINGLE_PID = """
+LISTEN 0      4096              *:8080             *:*    users:(("service",pid=4242,fd=3))
+"""
+
+SS_OUTPUT_MULTI_PID = """
+LISTEN 0      4096              *:8080             *:*    users:(("service",pid=4242,fd=3),("service",pid=5252,fd=4))
+"""
+
 
 class CollectorParserTests(unittest.TestCase):
 	def test_parse_cpu_metrics_output(self) -> None:
@@ -102,6 +146,52 @@ class CollectorParserTests(unittest.TestCase):
 			'raspberry_pi_disk_write_bytes_per_second{device="mmcblk0"} 65536.00',
 			lines,
 		)
+
+	def test_parse_pid_cpu_metrics_output(self) -> None:
+		lines = parse_pid_cpu_metrics_output(PIDSTAT_CPU_OUTPUT, 4242)
+		self.assertIn(
+			'raspberry_pi_app_cpu_usage_percent{pid="4242",command="service"} 6.00',
+			lines,
+		)
+
+	def test_parse_pid_memory_metrics_output(self) -> None:
+		lines = parse_pid_memory_metrics_output(PIDSTAT_MEMORY_OUTPUT, 4242)
+		self.assertIn(
+			'raspberry_pi_app_memory_virtual_bytes{pid="4242",command="service"} 1073741824',
+			lines,
+		)
+		self.assertIn(
+			'raspberry_pi_app_memory_resident_bytes{pid="4242",command="service"} 67108864',
+			lines,
+		)
+		self.assertIn(
+			'raspberry_pi_app_memory_percent{pid="4242",command="service"} 1.50',
+			lines,
+		)
+
+	def test_parse_pid_disk_metrics_output(self) -> None:
+		lines = parse_pid_disk_metrics_output(PIDSTAT_DISK_OUTPUT, 4242)
+		self.assertIn(
+			'raspberry_pi_app_disk_read_bytes_per_second{pid="4242",command="service"} 122880.00',
+			lines,
+		)
+		self.assertIn(
+			'raspberry_pi_app_disk_write_bytes_per_second{pid="4242",command="service"} 65536.00',
+			lines,
+		)
+
+	def test_parse_listening_pids_output(self) -> None:
+		self.assertEqual(parse_listening_pids_output(SS_OUTPUT_SINGLE_PID), [4242])
+
+	def test_discover_pid_for_port(self) -> None:
+		with patch("main.run_command", return_value=SS_OUTPUT_SINGLE_PID) as mock_run:
+			self.assertEqual(discover_pid_for_port(8080), 4242)
+		mock_run.assert_called_once_with(["ss", "-ltnpH", "sport = :8080"])
+
+	def test_discover_pid_for_port_rejects_multiple_matches(self) -> None:
+		with patch("main.run_command", return_value=SS_OUTPUT_MULTI_PID):
+			with self.assertRaisesRegex(RuntimeError, "multiple listening processes found"):
+				discover_pid_for_port(8080)
 
 
 if __name__ == "__main__":

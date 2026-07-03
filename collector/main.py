@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -20,7 +21,10 @@ DEFAULT_JOB_NAME = "raspberry_pi_macro_metrics"
 DEFAULT_INTERVAL_SECONDS = 10
 TOOL_SAMPLE_SECONDS = 1
 REQUIRED_COMMANDS = ("mpstat", "vmstat", "sar", "iostat")
+PID_REQUIRED_COMMANDS = ("pidstat",)
+PID_DISCOVERY_REQUIRED_COMMANDS = ("ss",)
 COMMAND_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+PID_PATTERN = re.compile(r"pid=(\d+)")
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,16 +47,39 @@ def parse_args() -> argparse.Namespace:
 		default=DEFAULT_INTERVAL_SECONDS,
 		help=f"Seconds between samples. Default: {DEFAULT_INTERVAL_SECONDS}",
 	)
+	pid_group = parser.add_mutually_exclusive_group()
+	pid_group.add_argument(
+		"--pid",
+		type=int,
+		help="Collect app-scoped CPU, memory, and disk I/O for this PID instead of host-wide metrics.",
+	)
+	pid_group.add_argument(
+		"--pid-file",
+		help="Read the target PID from this file before each sample. Useful if the app PID changes on restart.",
+	)
+	pid_group.add_argument(
+		"--discover-port",
+		type=int,
+		help="Auto-discover the target PID from the process listening on this TCP port.",
+	)
 	return parser.parse_args()
 
 
-def ensure_required_commands() -> None:
+def pid_mode_enabled(args: argparse.Namespace) -> bool:
+	return args.pid is not None or args.pid_file is not None or args.discover_port is not None
+
+
+def ensure_required_commands(args: argparse.Namespace) -> None:
 	missing = [command for command in REQUIRED_COMMANDS if shutil.which(command) is None]
+	if pid_mode_enabled(args):
+		missing.extend(command for command in PID_REQUIRED_COMMANDS if shutil.which(command) is None)
+	if args.discover_port is not None:
+		missing.extend(command for command in PID_DISCOVERY_REQUIRED_COMMANDS if shutil.which(command) is None)
 	if missing:
 		raise RuntimeError(
 			"missing required Linux commands: "
 			+ ", ".join(missing)
-			+ ". Install procps and sysstat before starting the collector."
+			+ ". Install procps, iproute2, and sysstat before starting the collector."
 		)
 
 
@@ -88,6 +115,41 @@ def read_cpu_info() -> Dict[str, str]:
 	return info
 
 
+def parse_listening_pids_output(output: str) -> list[int]:
+	return sorted({int(match.group(1)) for match in PID_PATTERN.finditer(output)})
+
+
+def discover_pid_for_port(port: int) -> int:
+	output = run_command(["ss", "-ltnpH", f"sport = :{port}"])
+	pids = parse_listening_pids_output(output)
+	if not pids:
+		raise RuntimeError(f"failed to auto-discover pid for port {port}: no listening process found")
+	if len(pids) > 1:
+		pid_list = ", ".join(str(pid) for pid in pids)
+		raise RuntimeError(
+			f"failed to auto-discover pid for port {port}: multiple listening processes found ({pid_list})"
+		)
+	return pids[0]
+
+
+def resolve_pid(args: argparse.Namespace) -> int | None:
+	if args.pid is not None:
+		return args.pid
+	if args.pid_file:
+		try:
+			raw_pid = open(args.pid_file, "r", encoding="utf-8").read().strip()
+		except OSError as exc:
+			raise RuntimeError(f"failed to read pid file {args.pid_file}: {exc}") from exc
+
+		if not raw_pid.isdigit():
+			raise RuntimeError(f"pid file {args.pid_file} did not contain a valid integer PID")
+
+		return int(raw_pid)
+	if args.discover_port is not None:
+		return discover_pid_for_port(args.discover_port)
+	return None
+
+
 def parse_tabular_average_output(output: str, entity_field: str) -> tuple[list[str], list[list[str]]]:
 	headers: list[str] | None = None
 	rows: list[list[str]] = []
@@ -112,6 +174,34 @@ def parse_tabular_average_output(output: str, entity_field: str) -> tuple[list[s
 
 	if headers is None:
 		raise RuntimeError(f"failed to parse {entity_field} output")
+
+	return headers, rows
+
+
+def parse_pidstat_average_output(output: str, command_name: str) -> tuple[list[str], list[list[str]]]:
+	headers: list[str] | None = None
+	rows: list[list[str]] = []
+
+	for line in output.splitlines():
+		parts = line.split()
+		if not parts:
+			continue
+
+		if command_name in parts and "PID" in parts:
+			start_index = parts.index("UID")
+			headers = parts[start_index:]
+			continue
+
+		if parts[0] != "Average:" or headers is None:
+			continue
+
+		row = parts[-len(headers) :]
+		if row[0] == "UID":
+			continue
+		rows.append(row)
+
+	if headers is None:
+		raise RuntimeError(f"failed to parse {command_name} output")
 
 	return headers, rows
 
@@ -247,6 +337,100 @@ def parse_disk_metrics() -> list[str]:
 	return parse_disk_metrics_output(run_command(["iostat", "-d", "-k", str(TOOL_SAMPLE_SECONDS), "2"]))
 
 
+def parse_pid_cpu_metrics_output(output: str, pid: int) -> list[str]:
+	headers, rows = parse_pidstat_average_output(output, "Command")
+	pid_index = headers.index("PID")
+	cpu_index = headers.index("%CPU")
+	command_index = headers.index("Command")
+	lines = ["# TYPE raspberry_pi_app_cpu_usage_percent gauge"]
+
+	for row in rows:
+		if int(row[pid_index]) != pid:
+			continue
+		command = row[command_index]
+		lines.append(
+			f'raspberry_pi_app_cpu_usage_percent{{pid="{pid}",command="{command}"}} {float(row[cpu_index]):.2f}'
+		)
+
+	return lines
+
+
+def parse_pid_cpu_metrics(pid: int) -> list[str]:
+	return parse_pid_cpu_metrics_output(
+		run_command(["pidstat", "-u", "-p", str(pid), str(TOOL_SAMPLE_SECONDS), "1"]),
+		pid,
+	)
+
+
+def parse_pid_memory_metrics_output(output: str, pid: int) -> list[str]:
+	headers, rows = parse_pidstat_average_output(output, "Command")
+	pid_index = headers.index("PID")
+	vsz_index = headers.index("VSZ")
+	rss_index = headers.index("RSS")
+	mem_index = headers.index("%MEM")
+	command_index = headers.index("Command")
+	lines = [
+		"# TYPE raspberry_pi_app_memory_virtual_bytes gauge",
+		"# TYPE raspberry_pi_app_memory_resident_bytes gauge",
+		"# TYPE raspberry_pi_app_memory_percent gauge",
+	]
+
+	for row in rows:
+		if int(row[pid_index]) != pid:
+			continue
+		command = row[command_index]
+		lines.append(
+			f'raspberry_pi_app_memory_virtual_bytes{{pid="{pid}",command="{command}"}} {int(row[vsz_index]) * 1024}'
+		)
+		lines.append(
+			f'raspberry_pi_app_memory_resident_bytes{{pid="{pid}",command="{command}"}} {int(row[rss_index]) * 1024}'
+		)
+		lines.append(
+			f'raspberry_pi_app_memory_percent{{pid="{pid}",command="{command}"}} {float(row[mem_index]):.2f}'
+		)
+
+	return lines
+
+
+def parse_pid_memory_metrics(pid: int) -> list[str]:
+	return parse_pid_memory_metrics_output(
+		run_command(["pidstat", "-r", "-p", str(pid), str(TOOL_SAMPLE_SECONDS), "1"]),
+		pid,
+	)
+
+
+def parse_pid_disk_metrics_output(output: str, pid: int) -> list[str]:
+	headers, rows = parse_pidstat_average_output(output, "Command")
+	pid_index = headers.index("PID")
+	read_index = headers.index("kB_rd/s")
+	write_index = headers.index("kB_wr/s")
+	command_index = headers.index("Command")
+	lines = [
+		"# TYPE raspberry_pi_app_disk_read_bytes_per_second gauge",
+		"# TYPE raspberry_pi_app_disk_write_bytes_per_second gauge",
+	]
+
+	for row in rows:
+		if int(row[pid_index]) != pid:
+			continue
+		command = row[command_index]
+		lines.append(
+			f'raspberry_pi_app_disk_read_bytes_per_second{{pid="{pid}",command="{command}"}} {float(row[read_index]) * 1024:.2f}'
+		)
+		lines.append(
+			f'raspberry_pi_app_disk_write_bytes_per_second{{pid="{pid}",command="{command}"}} {float(row[write_index]) * 1024:.2f}'
+		)
+
+	return lines
+
+
+def parse_pid_disk_metrics(pid: int) -> list[str]:
+	return parse_pid_disk_metrics_output(
+		run_command(["pidstat", "-d", "-p", str(pid), str(TOOL_SAMPLE_SECONDS), "1"]),
+		pid,
+	)
+
+
 def format_pi_info(info: Dict[str, str]) -> Iterable[str]:
 	if not info:
 		return []
@@ -260,13 +444,26 @@ def format_pi_info(info: Dict[str, str]) -> Iterable[str]:
 	]
 
 
-def sample_metrics() -> str:
+def format_pid_mode_info(pid: int) -> list[str]:
+	return [
+		"# TYPE raspberry_pi_app_scope_info gauge",
+		f'raspberry_pi_app_scope_info{{pid="{pid}",scope="process",network_scope="unsupported"}} 1',
+	]
+
+
+def sample_metrics(pid: int | None = None) -> str:
 	cpu_info = read_cpu_info()
 	lines: list[str] = []
-	lines.extend(parse_cpu_metrics())
-	lines.extend(parse_memory_metrics())
-	lines.extend(parse_network_metrics())
-	lines.extend(parse_disk_metrics())
+	if pid is None:
+		lines.extend(parse_cpu_metrics())
+		lines.extend(parse_memory_metrics())
+		lines.extend(parse_network_metrics())
+		lines.extend(parse_disk_metrics())
+	else:
+		lines.extend(parse_pid_cpu_metrics(pid))
+		lines.extend(parse_pid_memory_metrics(pid))
+		lines.extend(parse_pid_disk_metrics(pid))
+		lines.extend(format_pid_mode_info(pid))
 	lines.extend(format_pi_info(cpu_info))
 	return "\n".join(lines) + "\n"
 
@@ -297,7 +494,7 @@ def main() -> int:
 		return 1
 
 	try:
-		ensure_required_commands()
+		ensure_required_commands(args)
 	except RuntimeError as exc:
 		print(exc, file=sys.stderr)
 		return 1
@@ -306,7 +503,8 @@ def main() -> int:
 		start = time.monotonic()
 
 		try:
-			payload = sample_metrics()
+			pid = resolve_pid(args)
+			payload = sample_metrics(pid=pid)
 			push_metrics(pushgateway_url, job_name, instance, payload)
 			print(
 				f"pushed metrics to {pushgateway_url} at {time.strftime('%Y-%m-%d %H:%M:%S')}",

@@ -20,6 +20,8 @@ Build a lightweight Linux observability tool for a single microservice, with the
    - wraps `vmstat` for memory footprint
    - wraps `sar -n DEV` for network bandwidth
    - wraps `iostat` for disk bandwidth
+   - optionally wraps `pidstat` for app-scoped CPU, memory, and disk I/O by PID
+   - can auto-discover the app PID from a listening TCP port with `ss`
    - reads `/proc/cpuinfo` for hardware metadata
    - pushes metrics to Prometheus Pushgateway every 10 seconds
 
@@ -79,6 +81,11 @@ Collected by the Python Linux-tool collector:
 - `raspberry_pi_network_transmit_bytes_per_second{iface="wlan0"}`
 - `raspberry_pi_disk_read_bytes_per_second{device="mmcblk0"}`
 - `raspberry_pi_disk_write_bytes_per_second{device="mmcblk0"}`
+- `raspberry_pi_app_cpu_usage_percent{pid="12345"}`
+- `raspberry_pi_app_memory_percent{pid="12345"}`
+- `raspberry_pi_app_disk_read_bytes_per_second{pid="12345"}`
+- `raspberry_pi_app_disk_write_bytes_per_second{pid="12345"}`
+- `raspberry_pi_app_scope_info{pid="12345",scope="process",network_scope="unsupported"}`
 - `raspberry_pi_info{model="...",hardware="..."}`
 
 ## Current experiment shape
@@ -88,6 +95,7 @@ The current Raspberry Pi setup is sufficient for live experiments:
 - workload inputs are controlled through HTTP query params
 - application-side timing is captured by Prometheus histograms in the service
 - host-side CPU, memory, network, and disk behavior is sampled through Linux system tools and pushed through Pushgateway
+- app-scoped CPU, memory, and disk I/O can be sampled separately in PID mode, either from an explicit PID, a PID file, or port-based auto-discovery
 - Grafana visualizes both streams from Prometheus on a single dashboard
 
 This makes it possible to compare:
@@ -95,6 +103,8 @@ This makes it possible to compare:
 - requested workload intensity, such as `iterations`, `mb`, and `hold_ms`
 - observed handler timing in the service
 - observed CPU, memory, network, and disk behavior on the Pi
+- optionally, observed CPU, memory, and disk I/O for the service process alone
+- with port discovery, service restarts do not require manually updating the collector PID target
 
 ## Deployment assumptions
 

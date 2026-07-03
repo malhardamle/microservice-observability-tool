@@ -31,7 +31,7 @@ mpstat/vmstat/sar/iostat -> Python collector -> Pushgateway -> Prometheus -> Gra
 ## What each part does
 
 - [service/main.go](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/service/main.go): runs the web service and exposes application metrics
-- [collector/main.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/collector/main.py): runs `mpstat`, `vmstat`, `sar`, and `iostat` and pushes host metrics every 10 seconds
+- [collector/main.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/collector/main.py): runs `mpstat`, `vmstat`, `sar`, and `iostat`, optionally auto-discovers the service PID from a listening port, and pushes metrics every 10 seconds
 - [deploy/prometheus.yml](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/deploy/prometheus.yml): tells Prometheus to scrape the service and Pushgateway
 - [scripts/locustfile.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/scripts/locustfile.py): defines controlled HTTP traffic patterns
 - Grafana: visualizes Prometheus application and host metrics for live experiment monitoring
@@ -47,6 +47,14 @@ The collector now wraps standard Linux tooling for macro host metrics:
 - `iostat` for disk bandwidth
 
 It still reads `/proc/cpuinfo` directly for Raspberry Pi hardware metadata labels.
+
+Optional app-focused mode:
+
+- `--pid <PID>` collects CPU, memory, and disk I/O for a single process with `pidstat`
+- `--pid-file <path>` reads the PID from a file before each sample
+- `--discover-port <PORT>` auto-discovers the PID from the process listening on that TCP port with `ss`
+- network remains host-scoped because per-process bandwidth attribution is not reliable with these tools
+- if discovery finds zero or multiple matching PIDs, the collector fails that sample loudly instead of guessing
 
 ## Local validation
 
@@ -78,10 +86,22 @@ python3 -m py_compile collector/main.py
 python3 collector/main.py --help
 ```
 
+Example PID-focused collector:
+
+```bash
+python3 collector/main.py --pid 12345
+```
+
+Recommended Pi command for the Go service on port `8080`:
+
+```bash
+python3 collector/main.py --discover-port 8080
+```
+
 Runtime dependency note:
 
 ```bash
-sudo apt-get install -y sysstat procps
+sudo apt-get install -y sysstat procps iproute2
 ```
 
 Raspberry Pi cross-build:
@@ -95,9 +115,11 @@ GOOS=linux GOARCH=arm64 go build -o service-linux-arm64
 
 1. The Go service exposes application metrics at `http://127.0.0.1:8080/metrics`.
 2. The collector samples host CPU, memory, network, and disk metrics every 10 seconds.
-3. The collector pushes host metrics to Pushgateway on `http://127.0.0.1:9091`.
-4. Prometheus scrapes both targets every 5 seconds for time-series storage and querying.
-5. Grafana reads Prometheus and renders experiment dashboards.
+3. In PID mode, the collector samples app CPU, memory, and disk I/O for a single process instead of host-wide stats.
+4. `--discover-port` resolves the PID from the service's listening socket before each sample, so restarts do not require manual PID updates.
+5. The collector pushes host or app-scoped metrics to Pushgateway on `http://127.0.0.1:9091`.
+6. Prometheus scrapes both targets every 5 seconds for time-series storage and querying.
+7. Grafana reads Prometheus and renders experiment dashboards.
 
 ## Raspberry Pi status
 
@@ -166,6 +188,11 @@ From the collector:
 - `raspberry_pi_network_transmit_bytes_per_second{iface="wlan0"}`
 - `raspberry_pi_disk_read_bytes_per_second{device="mmcblk0"}`
 - `raspberry_pi_disk_write_bytes_per_second{device="mmcblk0"}`
+- `raspberry_pi_app_cpu_usage_percent{pid="12345"}`
+- `raspberry_pi_app_memory_percent{pid="12345"}`
+- `raspberry_pi_app_disk_read_bytes_per_second{pid="12345"}`
+- `raspberry_pi_app_disk_write_bytes_per_second{pid="12345"}`
+- `raspberry_pi_app_scope_info{pid="12345",scope="process",network_scope="unsupported"}`
 - `raspberry_pi_info{model="...",hardware="..."}`
 
 ## Friend's Pi constraints
