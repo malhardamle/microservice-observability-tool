@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
-"""Collect Raspberry Pi host metrics and push them to a Prometheus Pushgateway."""
+"""Collect Raspberry Pi host metrics with Linux system tools and push them to Pushgateway."""
 
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Iterable
 
 
 DEFAULT_PUSHGATEWAY = "http://127.0.0.1:9091"
-DEFAULT_JOB_NAME = "raspberry_pi_procfs"
-DEFAULT_INTERVAL_SECONDS = 5
-
-
-@dataclass
-class CpuTimes:
-	total: int
-	idle: int
+DEFAULT_JOB_NAME = "raspberry_pi_macro_metrics"
+DEFAULT_INTERVAL_SECONDS = 10
+TOOL_SAMPLE_SECONDS = 1
+REQUIRED_COMMANDS = ("mpstat", "vmstat", "sar", "iostat")
+COMMAND_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
 
 
 def parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
-		description="Push Raspberry Pi CPU and memory metrics to a Prometheus Pushgateway."
+		description="Push Raspberry Pi CPU, memory, network, and disk metrics to a Prometheus Pushgateway."
 	)
 	parser.add_argument(
 		"--pushgateway",
@@ -47,22 +46,30 @@ def parse_args() -> argparse.Namespace:
 	return parser.parse_args()
 
 
-def read_proc_stat() -> Dict[str, CpuTimes]:
-	stats: Dict[str, CpuTimes] = {}
+def ensure_required_commands() -> None:
+	missing = [command for command in REQUIRED_COMMANDS if shutil.which(command) is None]
+	if missing:
+		raise RuntimeError(
+			"missing required Linux commands: "
+			+ ", ".join(missing)
+			+ ". Install procps and sysstat before starting the collector."
+		)
 
-	with open("/proc/stat", "r", encoding="utf-8") as proc_stat:
-		for line in proc_stat:
-			parts = line.split()
-			if not parts or not parts[0].startswith("cpu"):
-				continue
 
-			name = parts[0]
-			values = [int(value) for value in parts[1:]]
-			idle = values[3] + (values[4] if len(values) > 4 else 0)
-			total = sum(values)
-			stats[name] = CpuTimes(total=total, idle=idle)
+def run_command(command: list[str]) -> str:
+	try:
+		result = subprocess.run(
+			command,
+			check=True,
+			capture_output=True,
+			text=True,
+			env=COMMAND_ENV,
+		)
+	except subprocess.CalledProcessError as exc:
+		stderr = exc.stderr.strip() or exc.stdout.strip()
+		raise RuntimeError(f"{command[0]} failed: {stderr}") from exc
 
-	return stats
+	return result.stdout
 
 
 def read_cpu_info() -> Dict[str, str]:
@@ -81,68 +88,186 @@ def read_cpu_info() -> Dict[str, str]:
 	return info
 
 
-def read_meminfo() -> Dict[str, int]:
-	meminfo: Dict[str, int] = {}
+def parse_tabular_average_output(output: str, entity_field: str) -> tuple[list[str], list[list[str]]]:
+	headers: list[str] | None = None
+	rows: list[list[str]] = []
 
-	with open("/proc/meminfo", "r", encoding="utf-8") as meminfo_file:
-		for line in meminfo_file:
-			parts = line.replace(":", "").split()
-			if len(parts) < 2:
-				continue
-			meminfo[parts[0]] = int(parts[1]) * 1024
+	for line in output.splitlines():
+		parts = line.split()
+		if not parts:
+			continue
 
-	return meminfo
+		if entity_field in parts:
+			start_index = parts.index(entity_field)
+			headers = parts[start_index:]
+			continue
+
+		if parts[0] != "Average:" or headers is None:
+			continue
+
+		row = parts[-len(headers) :]
+		if row[0] == entity_field:
+			continue
+		rows.append(row)
+
+	if headers is None:
+		raise RuntimeError(f"failed to parse {entity_field} output")
+
+	return headers, rows
 
 
-def compute_cpu_busy_percent(previous: CpuTimes, current: CpuTimes) -> float:
-	total_delta = current.total - previous.total
-	idle_delta = current.idle - previous.idle
+def parse_cpu_metrics_output(output: str) -> list[str]:
+	headers, rows = parse_tabular_average_output(output, "CPU")
+	idle_index = headers.index("%idle")
+	lines = ["# TYPE raspberry_pi_cpu_usage_percent gauge"]
 
-	if total_delta <= 0:
-		return 0.0
+	for row in rows:
+		cpu_name = row[0]
+		label = "cpu" if cpu_name == "all" else f"cpu{cpu_name}"
+		busy_percent = max(0.0, 100.0 - float(row[idle_index]))
+		lines.append(f'raspberry_pi_cpu_usage_percent{{cpu="{label}"}} {busy_percent:.2f}')
 
-	busy_delta = total_delta - idle_delta
-	return (busy_delta / total_delta) * 100.0
+	return lines
 
 
-def sample_metrics(previous_cpu: Dict[str, CpuTimes], current_cpu: Dict[str, CpuTimes]) -> str:
-	meminfo = read_meminfo()
-	cpu_info = read_cpu_info()
-	mem_total = meminfo.get("MemTotal", 0)
-	mem_available = meminfo.get("MemAvailable", 0)
-	mem_used = max(mem_total - mem_available, 0)
+def parse_cpu_metrics() -> list[str]:
+	return parse_cpu_metrics_output(run_command(["mpstat", "-P", "ALL", str(TOOL_SAMPLE_SECONDS), "1"]))
+
+
+def parse_memory_metrics_output(output: str) -> list[str]:
+	values: Dict[str, int] = {}
+
+	for line in output.splitlines():
+		parts = line.split(None, 1)
+		if len(parts) != 2 or not parts[0].isdigit():
+			continue
+		label = parts[1].strip()
+		if label.startswith("K "):
+			label = label[2:]
+		values[label] = int(parts[0]) * 1024
+
+	mem_total = values.get("total memory", 0)
+	mem_used = values.get("used memory", 0)
+	mem_free = values.get("free memory", 0)
+	mem_available = mem_free
 	mem_used_percent = (mem_used / mem_total * 100.0) if mem_total else 0.0
 
-	lines = [
-		"# TYPE raspberry_pi_cpu_usage_percent gauge",
+	return [
 		"# TYPE raspberry_pi_memory_total_bytes gauge",
 		"# TYPE raspberry_pi_memory_available_bytes gauge",
+		"# TYPE raspberry_pi_memory_free_bytes gauge",
 		"# TYPE raspberry_pi_memory_used_bytes gauge",
 		"# TYPE raspberry_pi_memory_used_percent gauge",
+		f"raspberry_pi_memory_total_bytes {mem_total}",
+		f"raspberry_pi_memory_available_bytes {mem_available}",
+		f"raspberry_pi_memory_free_bytes {mem_free}",
+		f"raspberry_pi_memory_used_bytes {mem_used}",
+		f"raspberry_pi_memory_used_percent {mem_used_percent:.2f}",
 	]
 
-	for cpu_name in sorted(current_cpu):
-		if cpu_name not in previous_cpu:
+
+def parse_memory_metrics() -> list[str]:
+	return parse_memory_metrics_output(run_command(["vmstat", "-s", "-S", "K"]))
+
+
+def parse_network_metrics_output(output: str) -> list[str]:
+	headers, rows = parse_tabular_average_output(output, "IFACE")
+	rx_index = headers.index("rxkB/s")
+	tx_index = headers.index("txkB/s")
+	lines = [
+		"# TYPE raspberry_pi_network_receive_bytes_per_second gauge",
+		"# TYPE raspberry_pi_network_transmit_bytes_per_second gauge",
+	]
+
+	for row in rows:
+		iface = row[0]
+		if iface == "lo":
 			continue
-		busy_percent = compute_cpu_busy_percent(previous_cpu[cpu_name], current_cpu[cpu_name])
-		lines.append(f'raspberry_pi_cpu_usage_percent{{cpu="{cpu_name}"}} {busy_percent:.2f}')
-
-	lines.extend(
-		[
-			f"raspberry_pi_memory_total_bytes {mem_total}",
-			f"raspberry_pi_memory_available_bytes {mem_available}",
-			f"raspberry_pi_memory_used_bytes {mem_used}",
-			f"raspberry_pi_memory_used_percent {mem_used_percent:.2f}",
-		]
-	)
-
-	if cpu_info:
-		lines.append("# TYPE raspberry_pi_info gauge")
-		labels = ",".join(
-			f'{key}="{value.replace(chr(34), "")}"' for key, value in sorted(cpu_info.items())
+		rx_bytes_per_second = float(row[rx_index]) * 1024
+		tx_bytes_per_second = float(row[tx_index]) * 1024
+		lines.append(
+			f'raspberry_pi_network_receive_bytes_per_second{{iface="{iface}"}} {rx_bytes_per_second:.2f}'
 		)
-		lines.append(f"raspberry_pi_info{{{labels}}} 1")
+		lines.append(
+			f'raspberry_pi_network_transmit_bytes_per_second{{iface="{iface}"}} {tx_bytes_per_second:.2f}'
+		)
 
+	return lines
+
+
+def parse_network_metrics() -> list[str]:
+	return parse_network_metrics_output(run_command(["sar", "-n", "DEV", str(TOOL_SAMPLE_SECONDS), "1"]))
+
+
+def parse_disk_metrics_output(output: str) -> list[str]:
+	headers: list[str] | None = None
+	rows: list[list[str]] = []
+
+	for line in output.splitlines():
+		parts = line.split()
+		if not parts:
+			continue
+
+		if parts[0] == "Device":
+			headers = parts
+			rows = []
+			continue
+
+		if headers is None or parts[0].startswith("Linux"):
+			continue
+
+		if len(parts) >= len(headers):
+			rows.append(parts[: len(headers)])
+
+	if headers is None:
+		raise RuntimeError("failed to parse iostat output")
+
+	read_index = headers.index("kB_read/s")
+	write_index = headers.index("kB_wrtn/s")
+	lines = [
+		"# TYPE raspberry_pi_disk_read_bytes_per_second gauge",
+		"# TYPE raspberry_pi_disk_write_bytes_per_second gauge",
+	]
+
+	for row in rows:
+		device = row[0]
+		read_bytes_per_second = float(row[read_index]) * 1024
+		write_bytes_per_second = float(row[write_index]) * 1024
+		lines.append(
+			f'raspberry_pi_disk_read_bytes_per_second{{device="{device}"}} {read_bytes_per_second:.2f}'
+		)
+		lines.append(
+			f'raspberry_pi_disk_write_bytes_per_second{{device="{device}"}} {write_bytes_per_second:.2f}'
+		)
+
+	return lines
+
+
+def parse_disk_metrics() -> list[str]:
+	return parse_disk_metrics_output(run_command(["iostat", "-d", "-k", str(TOOL_SAMPLE_SECONDS), "2"]))
+
+
+def format_pi_info(info: Dict[str, str]) -> Iterable[str]:
+	if not info:
+		return []
+
+	labels = ",".join(
+		f'{key}="{value.replace(chr(34), "")}"' for key, value in sorted(info.items())
+	)
+	return [
+		"# TYPE raspberry_pi_info gauge",
+		f"raspberry_pi_info{{{labels}}} 1",
+	]
+
+
+def sample_metrics() -> str:
+	cpu_info = read_cpu_info()
+	lines: list[str] = []
+	lines.extend(parse_cpu_metrics())
+	lines.extend(parse_memory_metrics())
+	lines.extend(parse_network_metrics())
+	lines.extend(parse_disk_metrics())
+	lines.extend(format_pi_info(cpu_info))
 	return "\n".join(lines) + "\n"
 
 
@@ -167,20 +292,31 @@ def main() -> int:
 	interval = args.interval
 	instance = socket.gethostname()
 
-	previous_cpu = read_proc_stat()
+	if interval <= 0:
+		print("interval must be positive", file=sys.stderr)
+		return 1
+
+	try:
+		ensure_required_commands()
+	except RuntimeError as exc:
+		print(exc, file=sys.stderr)
+		return 1
 
 	while True:
-		time.sleep(interval)
-		current_cpu = read_proc_stat()
-		payload = sample_metrics(previous_cpu, current_cpu)
+		start = time.monotonic()
 
 		try:
+			payload = sample_metrics()
 			push_metrics(pushgateway_url, job_name, instance, payload)
-			print(f"pushed metrics to {pushgateway_url} at {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
-		except (OSError, urllib.error.URLError, RuntimeError) as exc:
+			print(
+				f"pushed metrics to {pushgateway_url} at {time.strftime('%Y-%m-%d %H:%M:%S')}",
+				flush=True,
+			)
+		except (OSError, RuntimeError, urllib.error.URLError) as exc:
 			print(f"failed to push metrics: {exc}", file=sys.stderr, flush=True)
 
-		previous_cpu = current_cpu
+		elapsed = time.monotonic() - start
+		time.sleep(max(interval - elapsed, 0))
 
 
 if __name__ == "__main__":
