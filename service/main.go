@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"time"
@@ -79,8 +81,8 @@ const (
 	maxMemoryWorkloadHoldMS     = 10000
 	defaultCPUWorkIterations    = 50_000_000
 	maxCPUWorkIterations        = 500_000_000
-	defaultIOWorkSleepMS        = 25
-	maxIOWorkSleepMS            = 10000
+	defaultIOWorkloadMB         = 32
+	maxIOWorkloadMB             = 256
 )
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -162,26 +164,76 @@ func cpuWorkHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func ioWorkHandler(w http.ResponseWriter, r *http.Request) {
-	sleepMS, err := parsePositiveIntParam(r, "sleep_ms", defaultIOWorkSleepMS, maxIOWorkSleepMS)
+	mb, err := parsePositiveIntParam(r, "mb", defaultIOWorkloadMB, maxIOWorkloadMB)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "sleep_ms must be a positive integer up to 10000",
+			"error": "mb must be a positive integer up to 256",
 		})
 		return
 	}
 
 	start := time.Now()
-
-	time.Sleep(time.Duration(sleepMS) * time.Millisecond)
+	bytesWritten, bytesRead, err := runDiskWorkload(mb)
+	if err != nil {
+		log.Printf("disk workload failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "disk workload failed",
+		})
+		return
+	}
 
 	elapsed := time.Since(start)
 	ioWorkDuration.Observe(elapsed.Seconds())
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"workload":   "io",
-		"sleep_ms":   sleepMS,
-		"elapsed_ms": elapsed.Milliseconds(),
+		"workload":      "io",
+		"mb":            mb,
+		"bytes_written": bytesWritten,
+		"bytes_read":    bytesRead,
+		"elapsed_ms":    elapsed.Milliseconds(),
 	})
+}
+
+func runDiskWorkload(mb int) (int64, int64, error) {
+	tempFile, err := os.CreateTemp("", "observability-io-*")
+	if err != nil {
+		return 0, 0, err
+	}
+
+	path := tempFile.Name()
+	defer func() {
+		_ = tempFile.Close()
+		_ = os.Remove(path)
+	}()
+
+	chunk := make([]byte, 1024*1024)
+	for i := range chunk {
+		chunk[i] = byte(i % 251)
+	}
+
+	var bytesWritten int64
+	for i := 0; i < mb; i++ {
+		written, writeErr := tempFile.Write(chunk)
+		bytesWritten += int64(written)
+		if writeErr != nil {
+			return bytesWritten, 0, writeErr
+		}
+	}
+
+	if err := tempFile.Sync(); err != nil {
+		return bytesWritten, 0, err
+	}
+
+	if _, err := tempFile.Seek(0, 0); err != nil {
+		return bytesWritten, 0, err
+	}
+
+	bytesRead, err := io.Copy(io.Discard, tempFile)
+	if err != nil {
+		return bytesWritten, bytesRead, err
+	}
+
+	return bytesWritten, bytesRead, nil
 }
 
 func parsePositiveIntParam(r *http.Request, name string, defaultValue int, maxValue int) (int, error) {

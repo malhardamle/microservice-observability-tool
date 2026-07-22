@@ -73,7 +73,7 @@ Expected checks:
 ```bash
 curl http://127.0.0.1:8080/health
 curl "http://127.0.0.1:8080/work/cpu?iterations=100000000"
-curl "http://127.0.0.1:8080/work/io?sleep_ms=250"
+curl "http://127.0.0.1:8080/work/io?mb=64"
 curl "http://127.0.0.1:8080/work/mem?mb=128&hold_ms=1000"
 curl -s http://127.0.0.1:8080/metrics | grep observability
 ```
@@ -152,7 +152,7 @@ Working endpoints:
 ```bash
 curl http://127.0.0.1:8080/health
 curl "http://127.0.0.1:8080/work/cpu?iterations=100000000"
-curl "http://127.0.0.1:8080/work/io?sleep_ms=250"
+curl "http://127.0.0.1:8080/work/io?mb=64"
 curl "http://127.0.0.1:8080/work/mem?mb=256&hold_ms=3000"
 ```
 
