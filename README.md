@@ -108,8 +108,9 @@ bash scripts/pi-stop.sh
 
 These scripts:
 
-- start the Go service, Pushgateway, Prometheus, and the collector in the background
+- build and start the Go service binary, Pushgateway, Prometheus, and the collector in the background
 - write logs under `.pi-runtime/logs`
+- place the managed service binary under `.pi-runtime/bin`
 - store PID files under `.pi-runtime/pids`
 - assume Prometheus is exposed on `9092` to avoid collisions with an existing `9090`
 - leave Grafana unmanaged, but include it in health checks when it is already running

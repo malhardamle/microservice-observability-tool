@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RUNTIME_DIR="${REPO_ROOT}/.pi-runtime"
+BIN_DIR="${RUNTIME_DIR}/bin"
 LOG_DIR="${RUNTIME_DIR}/logs"
 PID_DIR="${RUNTIME_DIR}/pids"
 
@@ -16,7 +17,7 @@ COLLECTOR_INTERVAL="${COLLECTOR_INTERVAL:-10}"
 PROMETHEUS_CONFIG="${PROMETHEUS_CONFIG:-${REPO_ROOT}/deploy/prometheus.yml}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-http://127.0.0.1:${PUSHGATEWAY_PORT}}"
 
-mkdir -p "${LOG_DIR}" "${PID_DIR}"
+mkdir -p "${BIN_DIR}" "${LOG_DIR}" "${PID_DIR}"
 
 find_binary_dir() {
 	local pattern="$1"
@@ -107,4 +108,3 @@ print_health() {
 		echo "${label}: down"
 	fi
 }
-
