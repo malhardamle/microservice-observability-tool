@@ -24,7 +24,7 @@ Build a lightweight Linux observability tool for a single microservice, with the
    - reads `/proc/<pid>/io` deltas for app-scoped disk I/O by PID
    - can auto-discover the app PID from a listening TCP port with `ss`
    - reads `/proc/cpuinfo` for hardware metadata
-   - pushes metrics to Prometheus Pushgateway every 10 seconds
+   - pushes metrics to Prometheus Pushgateway every 5 seconds
 
 3. Pushgateway
    - receives pushed host metrics from the collector
@@ -108,6 +108,7 @@ This makes it possible to compare:
 - observed CPU, memory, network, and disk behavior on the Pi
 - optionally, observed CPU, memory, and disk I/O for the service process alone
 - with port discovery, service restarts do not require manually updating the collector PID target
+- Pi helper scripts can also clear Pushgateway metrics and reset Prometheus TSDB state before a clean experiment run
 
 ## Deployment assumptions
 

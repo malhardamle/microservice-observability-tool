@@ -8,7 +8,7 @@ This project builds a small observability pipeline around a Go microservice, a L
 - Prometheus scrape endpoint at `/metrics`
 - Parameterized CPU, I/O, and memory workload endpoints
 - Python collector for host CPU, memory, network, and disk metrics
-- 10-second metric push cycle to Pushgateway
+- 5-second metric push cycle to Pushgateway
 - Prometheus scrape config
 - Grafana dashboard support over Prometheus
 - Locust load script for repeatable HTTP pressure
@@ -31,7 +31,7 @@ mpstat/vmstat/sar/iostat -> Python collector -> Pushgateway -> Prometheus -> Gra
 ## What each part does
 
 - [service/main.go](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/service/main.go): runs the web service and exposes application metrics
-- [collector/main.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/collector/main.py): runs `mpstat`, `vmstat`, `sar`, and `iostat`, optionally auto-discovers the service PID from a listening port, and pushes metrics every 10 seconds
+- [collector/main.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/collector/main.py): runs `mpstat`, `vmstat`, `sar`, and `iostat`, optionally auto-discovers the service PID from a listening port, and pushes metrics every 5 seconds
 - [deploy/prometheus.yml](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/deploy/prometheus.yml): tells Prometheus to scrape the service and Pushgateway
 - [scripts/locustfile.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/scripts/locustfile.py): defines controlled HTTP traffic patterns
 - Grafana: visualizes Prometheus application and host metrics for live experiment monitoring
@@ -105,14 +105,18 @@ Pi helper scripts:
 bash scripts/pi-start.sh
 bash scripts/pi-status.sh
 bash scripts/pi-stop.sh
+bash scripts/pi-reset-data.sh
 ```
 
 These scripts:
 
 - build and start the Go service binary, Pushgateway, Prometheus, and the collector in the background
+- auto-discover the service PID and push app-scoped metrics every 5 seconds by default
 - write logs under `.pi-runtime/logs`
 - place the managed service binary under `.pi-runtime/bin`
 - store PID files under `.pi-runtime/pids`
+- store Prometheus data under `.pi-runtime/prometheus-data`
+- reset Prometheus and Pushgateway history with `bash scripts/pi-reset-data.sh`
 - assume Prometheus is exposed on `9092` to avoid collisions with an existing `9090`
 - leave Grafana unmanaged, but include it in health checks when it is already running
 
@@ -132,7 +136,7 @@ GOOS=linux GOARCH=arm64 go build -o service-linux-arm64
 ## Prometheus flow
 
 1. The Go service exposes application metrics at `http://127.0.0.1:8080/metrics`.
-2. The collector samples host CPU, memory, network, and disk metrics every 10 seconds.
+2. The collector samples host CPU, memory, network, and disk metrics every 5 seconds.
 3. In PID mode, the collector samples app CPU, memory, and disk I/O for a single process instead of host-wide stats.
 4. `--discover-port` resolves the PID from the service's listening socket before each sample, so restarts do not require manual PID updates.
 5. The collector pushes host or app-scoped metrics to Pushgateway on `http://127.0.0.1:9091`.

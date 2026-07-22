@@ -34,8 +34,8 @@ ensure_port_free "${PROMETHEUS_PORT}" "prometheus"
 )
 
 start_background service "${SERVICE_BINARY}"
-start_background pushgateway "${PUSHGATEWAY_DIR}/pushgateway" --web.listen-address=":${PUSHGATEWAY_PORT}"
-start_background prometheus "${PROMETHEUS_DIR}/prometheus" --config.file="${PROMETHEUS_CONFIG}" --web.listen-address=":${PROMETHEUS_PORT}"
+start_background pushgateway "${PUSHGATEWAY_DIR}/pushgateway" --web.listen-address=":${PUSHGATEWAY_PORT}" --web.enable-admin-api
+start_background prometheus "${PROMETHEUS_DIR}/prometheus" --config.file="${PROMETHEUS_CONFIG}" --web.listen-address=":${PROMETHEUS_PORT}" --storage.tsdb.path="${PROMETHEUS_DATA_DIR}"
 start_background collector python3 "${REPO_ROOT}/collector/main.py" --discover-port "${SERVICE_PORT}" --interval "${COLLECTOR_INTERVAL}" --pushgateway "${PUSHGATEWAY_URL}"
 
 sleep 3

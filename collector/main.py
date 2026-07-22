@@ -19,7 +19,7 @@ from typing import Dict, Iterable
 
 DEFAULT_PUSHGATEWAY = "http://127.0.0.1:9091"
 DEFAULT_JOB_NAME = "raspberry_pi_macro_metrics"
-DEFAULT_INTERVAL_SECONDS = 10
+DEFAULT_INTERVAL_SECONDS = 5
 TOOL_SAMPLE_SECONDS = 1
 REQUIRED_COMMANDS = ("mpstat", "vmstat", "sar", "iostat")
 PID_REQUIRED_COMMANDS = ("pidstat",)
