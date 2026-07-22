@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Dict, Iterable
 
 
@@ -25,6 +26,13 @@ PID_REQUIRED_COMMANDS = ("pidstat",)
 PID_DISCOVERY_REQUIRED_COMMANDS = ("ss",)
 COMMAND_ENV = {**os.environ, "LC_ALL": "C", "LANG": "C"}
 PID_PATTERN = re.compile(r"pid=(\d+)")
+PID_IO_FIELDS = ("rchar", "wchar", "read_bytes", "write_bytes")
+
+
+@dataclass
+class ProcessIOSnapshot:
+	pid: int
+	counters: Dict[str, int]
 
 
 def parse_args() -> argparse.Namespace:
@@ -204,6 +212,37 @@ def parse_pidstat_average_output(output: str, command_name: str) -> tuple[list[s
 		raise RuntimeError(f"failed to parse {command_name} output")
 
 	return headers, rows
+
+
+def parse_pid_io_output(output: str) -> Dict[str, int]:
+	counters: Dict[str, int] = {}
+
+	for line in output.splitlines():
+		if ":" not in line:
+			continue
+		key, raw_value = [part.strip() for part in line.split(":", 1)]
+		if key not in PID_IO_FIELDS:
+			continue
+		if not raw_value.isdigit():
+			raise RuntimeError(f"invalid integer value for {key} in /proc pid io output")
+		counters[key] = int(raw_value)
+
+	missing = [field for field in PID_IO_FIELDS if field not in counters]
+	if missing:
+		raise RuntimeError(f"missing expected /proc pid io fields: {', '.join(missing)}")
+
+	return counters
+
+
+def read_pid_io_snapshot(pid: int) -> ProcessIOSnapshot:
+	path = f"/proc/{pid}/io"
+	try:
+		with open(path, "r", encoding="utf-8") as io_file:
+			output = io_file.read()
+	except OSError as exc:
+		raise RuntimeError(f"failed to read {path}: {exc}") from exc
+
+	return ProcessIOSnapshot(pid=pid, counters=parse_pid_io_output(output))
 
 
 def parse_cpu_metrics_output(output: str) -> list[str]:
@@ -399,36 +438,68 @@ def parse_pid_memory_metrics(pid: int) -> list[str]:
 	)
 
 
-def parse_pid_disk_metrics_output(output: str, pid: int) -> list[str]:
-	headers, rows = parse_pidstat_average_output(output, "Command")
-	pid_index = headers.index("PID")
-	read_index = headers.index("kB_rd/s")
-	write_index = headers.index("kB_wr/s")
-	command_index = headers.index("Command")
+def format_pid_io_metrics(
+	pid: int,
+	command: str,
+	current_snapshot: ProcessIOSnapshot,
+	previous_snapshot: ProcessIOSnapshot | None,
+	interval_seconds: int,
+) -> list[str]:
 	lines = [
+		"# TYPE raspberry_pi_app_io_read_chars_bytes_per_second gauge",
+		"# TYPE raspberry_pi_app_io_write_chars_bytes_per_second gauge",
 		"# TYPE raspberry_pi_app_disk_read_bytes_per_second gauge",
 		"# TYPE raspberry_pi_app_disk_write_bytes_per_second gauge",
 	]
 
-	for row in rows:
-		if int(row[pid_index]) != pid:
-			continue
-		command = row[command_index]
-		lines.append(
-			f'raspberry_pi_app_disk_read_bytes_per_second{{pid="{pid}",command="{command}"}} {float(row[read_index]) * 1024:.2f}'
-		)
-		lines.append(
-			f'raspberry_pi_app_disk_write_bytes_per_second{{pid="{pid}",command="{command}"}} {float(row[write_index]) * 1024:.2f}'
-		)
+	if previous_snapshot is None or previous_snapshot.pid != current_snapshot.pid:
+		deltas = {field: 0 for field in PID_IO_FIELDS}
+	else:
+		deltas = {
+			field: max(0, current_snapshot.counters[field] - previous_snapshot.counters[field])
+			for field in PID_IO_FIELDS
+		}
+
+	read_chars_per_second = deltas["rchar"] / interval_seconds
+	write_chars_per_second = deltas["wchar"] / interval_seconds
+	read_bytes_per_second = deltas["read_bytes"] / interval_seconds
+	write_bytes_per_second = deltas["write_bytes"] / interval_seconds
+
+	lines.append(
+		f'raspberry_pi_app_io_read_chars_bytes_per_second{{pid="{pid}",command="{command}"}} {read_chars_per_second:.2f}'
+	)
+	lines.append(
+		f'raspberry_pi_app_io_write_chars_bytes_per_second{{pid="{pid}",command="{command}"}} {write_chars_per_second:.2f}'
+	)
+	lines.append(
+		f'raspberry_pi_app_disk_read_bytes_per_second{{pid="{pid}",command="{command}"}} {read_bytes_per_second:.2f}'
+	)
+	lines.append(
+		f'raspberry_pi_app_disk_write_bytes_per_second{{pid="{pid}",command="{command}"}} {write_bytes_per_second:.2f}'
+	)
 
 	return lines
 
 
-def parse_pid_disk_metrics(pid: int) -> list[str]:
-	return parse_pid_disk_metrics_output(
-		run_command(["pidstat", "-d", "-p", str(pid), str(TOOL_SAMPLE_SECONDS), "1"]),
-		pid,
-	)
+def parse_pid_disk_metrics(
+	pid: int,
+	command: str,
+	current_snapshot: ProcessIOSnapshot,
+	previous_snapshot: ProcessIOSnapshot | None,
+	interval_seconds: int,
+) -> list[str]:
+	return format_pid_io_metrics(pid, command, current_snapshot, previous_snapshot, interval_seconds)
+
+
+def read_process_command(pid: int) -> str:
+	path = f"/proc/{pid}/comm"
+	try:
+		with open(path, "r", encoding="utf-8") as comm_file:
+			command = comm_file.read().strip()
+	except OSError as exc:
+		raise RuntimeError(f"failed to read {path}: {exc}") from exc
+
+	return command or "unknown"
 
 
 def format_pi_info(info: Dict[str, str]) -> Iterable[str]:
@@ -451,21 +522,28 @@ def format_pid_mode_info(pid: int) -> list[str]:
 	]
 
 
-def sample_metrics(pid: int | None = None) -> str:
+def sample_metrics(
+	pid: int | None = None,
+	previous_io_snapshot: ProcessIOSnapshot | None = None,
+	interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
+) -> tuple[str, ProcessIOSnapshot | None]:
 	cpu_info = read_cpu_info()
 	lines: list[str] = []
+	next_io_snapshot: ProcessIOSnapshot | None = None
 	if pid is None:
 		lines.extend(parse_cpu_metrics())
 		lines.extend(parse_memory_metrics())
 		lines.extend(parse_network_metrics())
 		lines.extend(parse_disk_metrics())
 	else:
+		next_io_snapshot = read_pid_io_snapshot(pid)
+		command = read_process_command(pid)
 		lines.extend(parse_pid_cpu_metrics(pid))
 		lines.extend(parse_pid_memory_metrics(pid))
-		lines.extend(parse_pid_disk_metrics(pid))
+		lines.extend(parse_pid_disk_metrics(pid, command, next_io_snapshot, previous_io_snapshot, interval_seconds))
 		lines.extend(format_pid_mode_info(pid))
 	lines.extend(format_pi_info(cpu_info))
-	return "\n".join(lines) + "\n"
+	return "\n".join(lines) + "\n", next_io_snapshot
 
 
 def push_metrics(pushgateway_url: str, job_name: str, instance: str, payload: str) -> None:
@@ -499,18 +577,27 @@ def main() -> int:
 		print(exc, file=sys.stderr)
 		return 1
 
+	previous_io_snapshot: ProcessIOSnapshot | None = None
+
 	while True:
 		start = time.monotonic()
+		pid: int | None = None
 
 		try:
 			pid = resolve_pid(args)
-			payload = sample_metrics(pid=pid)
+			payload, previous_io_snapshot = sample_metrics(
+				pid=pid,
+				previous_io_snapshot=previous_io_snapshot,
+				interval_seconds=interval,
+			)
 			push_metrics(pushgateway_url, job_name, instance, payload)
 			print(
 				f"pushed metrics to {pushgateway_url} at {time.strftime('%Y-%m-%d %H:%M:%S')}",
 				flush=True,
 			)
 		except (OSError, RuntimeError, urllib.error.URLError) as exc:
+			if pid is None:
+				previous_io_snapshot = None
 			print(f"failed to push metrics: {exc}", file=sys.stderr, flush=True)
 
 		elapsed = time.monotonic() - start

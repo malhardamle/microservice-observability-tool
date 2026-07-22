@@ -20,7 +20,8 @@ Build a lightweight Linux observability tool for a single microservice, with the
    - wraps `vmstat` for memory footprint
    - wraps `sar -n DEV` for network bandwidth
    - wraps `iostat` for disk bandwidth
-   - optionally wraps `pidstat` for app-scoped CPU, memory, and disk I/O by PID
+   - optionally wraps `pidstat` for app-scoped CPU and memory by PID
+   - reads `/proc/<pid>/io` deltas for app-scoped disk I/O by PID
    - can auto-discover the app PID from a listening TCP port with `ss`
    - reads `/proc/cpuinfo` for hardware metadata
    - pushes metrics to Prometheus Pushgateway every 10 seconds
@@ -83,6 +84,8 @@ Collected by the Python Linux-tool collector:
 - `raspberry_pi_disk_write_bytes_per_second{device="mmcblk0"}`
 - `raspberry_pi_app_cpu_usage_percent{pid="12345"}`
 - `raspberry_pi_app_memory_percent{pid="12345"}`
+- `raspberry_pi_app_io_read_chars_bytes_per_second{pid="12345"}`
+- `raspberry_pi_app_io_write_chars_bytes_per_second{pid="12345"}`
 - `raspberry_pi_app_disk_read_bytes_per_second{pid="12345"}`
 - `raspberry_pi_app_disk_write_bytes_per_second{pid="12345"}`
 - `raspberry_pi_app_scope_info{pid="12345",scope="process",network_scope="unsupported"}`

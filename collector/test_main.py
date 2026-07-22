@@ -5,14 +5,16 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from main import (
+	ProcessIOSnapshot,
 	discover_pid_for_port,
+	format_pid_io_metrics,
 	parse_cpu_metrics_output,
 	parse_disk_metrics_output,
 	parse_listening_pids_output,
 	parse_memory_metrics_output,
 	parse_network_metrics_output,
 	parse_pid_cpu_metrics_output,
-	parse_pid_disk_metrics_output,
+	parse_pid_io_output,
 	parse_pid_memory_metrics_output,
 )
 from unittest.mock import patch
@@ -91,14 +93,14 @@ Average:      UID       PID  minflt/s  majflt/s     VSZ      RSS   %MEM  Command
 Average:     1000      4242      2.00      0.00  1048576    65536   1.50  service
 """
 
-PIDSTAT_DISK_OUTPUT = """
-Linux 6.8.0-1057-raspi (hayes-valley)   07/02/2026  _aarch64_  (4 CPU)
-
-10:10:01 PM   UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
-10:10:02 PM  1000      4242    120.00     64.00      0.00       0  service
-
-Average:      UID       PID   kB_rd/s   kB_wr/s kB_ccwr/s iodelay  Command
-Average:     1000      4242    120.00     64.00      0.00       0  service
+PROC_PID_IO_OUTPUT = """
+rchar: 166946
+wchar: 59853
+syscr: 463
+syscw: 28
+read_bytes: 0
+write_bytes: 4096
+cancelled_write_bytes: 0
 """
 
 SS_OUTPUT_SINGLE_PID = """
@@ -169,14 +171,47 @@ class CollectorParserTests(unittest.TestCase):
 			lines,
 		)
 
-	def test_parse_pid_disk_metrics_output(self) -> None:
-		lines = parse_pid_disk_metrics_output(PIDSTAT_DISK_OUTPUT, 4242)
+	def test_parse_pid_io_output(self) -> None:
+		counters = parse_pid_io_output(PROC_PID_IO_OUTPUT)
+		self.assertEqual(counters["rchar"], 166946)
+		self.assertEqual(counters["wchar"], 59853)
+		self.assertEqual(counters["read_bytes"], 0)
+		self.assertEqual(counters["write_bytes"], 4096)
+
+	def test_format_pid_io_metrics(self) -> None:
+		previous_snapshot = ProcessIOSnapshot(
+			pid=4242,
+			counters={
+				"rchar": 1024,
+				"wchar": 2048,
+				"read_bytes": 4096,
+				"write_bytes": 8192,
+			},
+		)
+		current_snapshot = ProcessIOSnapshot(
+			pid=4242,
+			counters={
+				"rchar": 3072,
+				"wchar": 6144,
+				"read_bytes": 12288,
+				"write_bytes": 20480,
+			},
+		)
+		lines = format_pid_io_metrics(4242, "service", current_snapshot, previous_snapshot, 2)
 		self.assertIn(
-			'raspberry_pi_app_disk_read_bytes_per_second{pid="4242",command="service"} 122880.00',
+			'raspberry_pi_app_io_read_chars_bytes_per_second{pid="4242",command="service"} 1024.00',
 			lines,
 		)
 		self.assertIn(
-			'raspberry_pi_app_disk_write_bytes_per_second{pid="4242",command="service"} 65536.00',
+			'raspberry_pi_app_io_write_chars_bytes_per_second{pid="4242",command="service"} 2048.00',
+			lines,
+		)
+		self.assertIn(
+			'raspberry_pi_app_disk_read_bytes_per_second{pid="4242",command="service"} 4096.00',
+			lines,
+		)
+		self.assertIn(
+			'raspberry_pi_app_disk_write_bytes_per_second{pid="4242",command="service"} 6144.00',
 			lines,
 		)
 

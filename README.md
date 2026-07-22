@@ -53,6 +53,7 @@ Optional app-focused mode:
 - `--pid <PID>` collects CPU, memory, and disk I/O for a single process with `pidstat`
 - `--pid-file <path>` reads the PID from a file before each sample
 - `--discover-port <PORT>` auto-discovers the PID from the process listening on that TCP port with `ss`
+- app disk I/O uses `/proc/<pid>/io` deltas for burst-friendly per-process read/write accounting
 - network remains host-scoped because per-process bandwidth attribution is not reliable with these tools
 - if discovery finds zero or multiple matching PIDs, the collector fails that sample loudly instead of guessing
 
@@ -207,6 +208,8 @@ From the collector:
 - `raspberry_pi_disk_write_bytes_per_second{device="mmcblk0"}`
 - `raspberry_pi_app_cpu_usage_percent{pid="12345"}`
 - `raspberry_pi_app_memory_percent{pid="12345"}`
+- `raspberry_pi_app_io_read_chars_bytes_per_second{pid="12345"}`
+- `raspberry_pi_app_io_write_chars_bytes_per_second{pid="12345"}`
 - `raspberry_pi_app_disk_read_bytes_per_second{pid="12345"}`
 - `raspberry_pi_app_disk_write_bytes_per_second{pid="12345"}`
 - `raspberry_pi_app_scope_info{pid="12345",scope="process",network_scope="unsupported"}`
