@@ -98,6 +98,22 @@ Recommended Pi command for the Go service on port `8080`:
 python3 collector/main.py --discover-port 8080
 ```
 
+Pi helper scripts:
+
+```bash
+bash scripts/pi-start.sh
+bash scripts/pi-status.sh
+bash scripts/pi-stop.sh
+```
+
+These scripts:
+
+- start the Go service, Pushgateway, Prometheus, and the collector in the background
+- write logs under `.pi-runtime/logs`
+- store PID files under `.pi-runtime/pids`
+- assume Prometheus is exposed on `9092` to avoid collisions with an existing `9090`
+- leave Grafana unmanaged, but include it in health checks when it is already running
+
 Runtime dependency note:
 
 ```bash
