@@ -30,12 +30,12 @@ mpstat/vmstat/sar/iostat -> Python collector -> Pushgateway -> Prometheus -> Gra
 
 ## What each part does
 
-- [service/main.go](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/service/main.go): runs the web service and exposes application metrics
-- [collector/main.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/collector/main.py): runs `mpstat`, `vmstat`, `sar`, and `iostat`, optionally auto-discovers the service PID from a listening port, and pushes metrics every 5 seconds
-- [deploy/prometheus.yml](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/deploy/prometheus.yml): tells Prometheus to scrape the service and Pushgateway
-- [scripts/locustfile.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/scripts/locustfile.py): defines controlled HTTP traffic patterns
+- [service/main.go](/microservice-observability-tool/service/main.go): runs the web service and exposes application metrics
+- [collector/main.py](/microservice-observability-tool/collector/main.py): runs `mpstat`, `vmstat`, `sar`, and `iostat`, optionally auto-discovers the service PID from a listening port, and pushes metrics every 5 seconds
+- [deploy/prometheus.yml](microservice-observability-tool/deploy/prometheus.yml): tells Prometheus to scrape the service and Pushgateway
+- [scripts/locustfile.py](microservice-observability-tool/scripts/locustfile.py): defines controlled HTTP traffic patterns
 - Grafana: visualizes Prometheus application and host metrics for live experiment monitoring
-- [dashboard/app.py](/Users/malhardamle/Desktop/side_projects/microservice-observability-tool/dashboard/app.py): placeholder FastAPI app for future dashboard work
+- [dashboard/app.py](/microservice-observability-tool/dashboard/app.py): placeholder FastAPI app for future dashboard work
 
 ## Host metric sources
 
@@ -64,7 +64,7 @@ The service and collector can be validated on your own machine before using the 
 Service:
 
 ```bash
-cd /Users/malhardamle/Desktop/side_projects/microservice-observability-tool/service
+cd /microservice-observability-tool/service
 go test ./...
 go run .
 ```
@@ -82,7 +82,7 @@ curl -s http://127.0.0.1:8080/metrics | grep observability
 Collector:
 
 ```bash
-cd /Users/malhardamle/Desktop/side_projects/microservice-observability-tool
+cd /microservice-observability-tool
 python3 -m py_compile collector/main.py
 python3 collector/main.py --help
 ```
@@ -129,7 +129,7 @@ sudo apt-get install -y sysstat procps iproute2
 Raspberry Pi cross-build:
 
 ```bash
-cd /Users/malhardamle/Desktop/side_projects/microservice-observability-tool/service
+cd /microservice-observability-tool/service
 GOOS=linux GOARCH=arm64 go build -o service-linux-arm64
 ```
 
@@ -180,7 +180,7 @@ Useful experiment dashboard signals:
 Open the Locust web UI:
 
 ```bash
-locust -f /Users/malhardamle/Desktop/side_projects/microservice-observability-tool/scripts/locustfile.py --host http://127.0.0.1:8080
+locust -f /microservice-observability-tool/scripts/locustfile.py --host http://127.0.0.1:8080
 ```
 
 Suggested first runs:
